@@ -1,0 +1,179 @@
+---
+- name: Install RabbitMQ
+  hosts: rabbitmq 
+  become: true
+  gather_facts: false
+  vars_files: 
+    - vars.yml
+
+  tasks: 
+    - name: Install required packages
+      apt:
+        name: "{{ item }}"
+        state: present
+      with_items:
+        - curl
+        - gnupg
+        - apt-transport-https
+
+    - name: Team RabbitMQ's main signing key
+      shell: curl -1sLf "https://keys.openpgp.org/vks/v1/by-fingerprint/0A9AF2115F4687BD29803A206B73A36E6026DFCA" | sudo gpg --dearmor | sudo tee /usr/share/keyrings/com.rabbitmq.team.gpg > /dev/null    
+
+    - name: Modern Erlang repository
+      shell: curl -1sLf https://ppa1.novemberain.com/gpg.E495BB49CC4BBE5B.key | sudo gpg --dearmor | sudo tee /usr/share/keyrings/rabbitmq.E495BB49CC4BBE5B.gpg > /dev/null
+
+    - name: RabbitMQ repository
+      shell: curl -1sLf https://ppa1.novemberain.com/gpg.9F4587F226208342.key | sudo gpg --dearmor | sudo tee /usr/share/keyrings/rabbitmq.9F4587F226208342.gpg > /dev/null
+
+    - name: Add apt repositories maintained by Team RabbitMQ
+      apt_repository:
+        filename: rabbitmq
+        repo: "deb [signed-by=/usr/share/keyrings/rabbitmq.E495BB49CC4BBE5B.gpg] https://ppa1.novemberain.com/rabbitmq/rabbitmq-erlang/deb/ubuntu bionic main"
+        state: present
+
+    - name: Add apt sources for RabbitMQ
+      apt_repository:
+        filename: rabbitmq
+        repo: "deb [signed-by=/usr/share/keyrings/rabbitmq.9F4587F226208342.gpg] https://ppa1.novemberain.com/rabbitmq/rabbitmq-server/deb/ubuntu bionic main"
+        state: present
+
+    - name: Update package indices
+      apt:
+        update_cache: yes
+
+    - name: Install Erlang packages
+      apt:
+        name:
+          - erlang-base
+          - erlang-asn1
+          - erlang-crypto
+          - erlang-eldap
+          - erlang-ftp
+          - erlang-inets
+          - erlang-mnesia
+          - erlang-os-mon
+          - erlang-parsetools
+          - erlang-public-key
+          - erlang-runtime-tools
+          - erlang-snmp
+          - erlang-ssl
+          - erlang-syntax-tools
+          - erlang-tftp
+          - erlang-tools
+          - erlang-xmerl
+        state: present
+
+    - name: Install rabbitmq-server and its dependencies
+      apt:
+        name: rabbitmq-server
+        state: present
+        #update_cache: yes
+
+    - name: Install RabbitMQ
+      apt:
+        name: rabbitmq-server
+        state: present
+
+    - name: Enable Web Console
+      rabbitmq_plugin:
+        name: rabbitmq_management
+        state: enabled
+
+    # - name: Check if RabbitMQ Enable or Not 
+    #   systemd:
+    #     name: rabbitmq-server
+    #     state: enabled
+    #   register: rabbitmq_service_status
+
+    # - name: Enable RabbitMQ service if it's not Enable
+    #   systemd:
+    #     name: rabbitmq-server
+    #     state: started
+    #     enabled: yes
+    #   when: rabbitmq_service_status is not defined or rabbitmq_service_status.state == 'stopped'
+    
+    - name: Create rabbitmq.conf file
+      copy:
+        dest: /etc/rabbitmq/rabbitmq.conf
+        content: |
+          ## pause_if_all_down strategy require additional configuration
+            cluster_partition_handling = pause_if_all_down
+
+          ## Recover strategy. Can be either 'autoheal' or 'ignore'
+            cluster_partition_handling.pause_if_all_down.recover = autoheal
+
+          ## Node names to check
+            cluster_partition_handling.pause_if_all_down.nodes.1 = rabbit@{{ HOST_1 }}
+            cluster_partition_handling.pause_if_all_down.nodes.2 = rabbit@{{ HOST_2 }}
+
+    - name: Start RabbitMq service
+      service:
+        name: rabbitmq-server
+        state: restarted
+        enabled: true
+
+    - name: Edit the Hosts file in server 1
+      become: true
+      lineinfile:
+        path: /etc/hosts
+        insertafter: "{{ item.insert_after }}"
+        line: "{{ item.new_line }}"
+      loop:
+        - { insert_after: '^db5', new_line: "{{ groups['rabbitmq'][1] }} {{ DNS_OR_IP_2 }} {{ HOST_2 }}" }
+      when: inventory_hostname == groups['rabbitmq'][0]
+
+    - name: Edit the Hosts file in server 2
+      become: true
+      lineinfile:
+        path: /etc/hosts
+        insertafter: "{{ item.insert_after }}"
+        line: "{{ item.new_line }}"
+      loop:
+        - { insert_after: '^db4', new_line: "{{ groups['rabbitmq'][0] }} {{ DNS_OR_IP_1 }} {{ HOST_1 }}" }
+      when: inventory_hostname == groups['rabbitmq'][1]
+
+    - name: Copy Erlang Cookie from server 1 to Repo Server
+      fetch: 
+        src: "/var/lib/rabbitmq/.erlang.cookie"
+        dest: "/opt/" 
+        flat: yes
+      when: inventory_hostname == groups['rabbitmq'][0]
+
+    - name: Copy Erlang Cookie from Repo server to server 2
+      copy: 
+        src: "/opt/.erlang.cookie"
+        dest: "/var/lib/rabbitmq/.erlang.cookie"
+        #delegate_to: localhost
+      when: inventory_hostname == groups['rabbitmq'][1]
+
+    - name: Enable RabbitMQ service if it's not Enable
+      systemd:
+        name: rabbitmq-server
+        state: restarted
+      when: inventory_hostname == groups['rabbitmq'][1]
+
+    - name: Stop RabbitMQ Application
+      become_user: root
+      shell: rabbitmqctl stop_app
+      when: inventory_hostname == groups['rabbitmq'][1]
+
+    - name: Reset RabbitMQ Application
+      become_user: root
+      shell: rabbitmqctl reset
+      when: inventory_hostname == groups['rabbitmq'][1]
+
+    - name: Join other node
+      shell: rabbitmqctl join_cluster rabbit@{{ HOST_1 }}
+      when: inventory_hostname == groups['rabbitmq'][1]
+
+    - name: Start RabbitMQ Application
+      become_user: root
+      shell: rabbitmqctl start_app
+      when: inventory_hostname == groups['rabbitmq'][1]
+
+    - name: Configure RMQ in the main node/server
+      shell: |
+        rabbitmqctl add_user admin {{ MQ_PASSWRD }}
+        rabbitmqctl set_user_tags admin administrator
+        rabbitmqctl set_policy ha-all "." '{"ha-mode":"all"}'
+        rabbitmqctl set_permissions -p / admin ".*" ".*" ".*"

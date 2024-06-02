@@ -1,0 +1,14 @@
+---
+#please add the mongodb environmental variables in here.
+REPLICA_NAME: rs0
+DB: ABC
+DB_USER: user
+DB_PASSWRD: 12345
+
+#Put your rabbitmq DNS & Server name of both servers
+DNS_OR_IP_1: rabbitmq1@ABC.lk
+HOST_1: db4
+DNS_OR_IP_2: rabbitmq2@ABC.lk
+HOST_2: db5
+USER_NAME: admin
+MQ_PASSWRD: 12345
