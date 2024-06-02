@@ -1,0 +1,1 @@
+# Ansible_RabbitMQ_Installer
