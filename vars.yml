@@ -1,7 +1,7 @@
 ---
 #please add the mongodb environmental variables in here.
 REPLICA_NAME: rs0
-DB: ABC
+DB: ABCD
 DB_USER: user
 DB_PASSWRD: 12345
 
