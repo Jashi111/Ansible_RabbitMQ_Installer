@@ -1,0 +1,258 @@
+---
+# Author: jashi111
+# Description: Playbook to install RabbitMQ and configure the system
+
+- name: Install and Configure RabbitMQ Cluster
+  hosts: rabbitmq
+  become: true
+  gather_facts: false
+  vars_files:
+    - vars.yml
+
+  vars_prompt:
+    - name: confirm_pre_tasks
+      prompt: "Do you want to execute the pre-tasks (stop and purge existing MongoDB setup)? (yes/no)"
+      private: no
+
+  pre_tasks:
+
+    - name: Stop RabbitMQ service
+      ansible.builtin.systemd:
+        name: rabbitmq-server
+        state: stopped
+        enabled: no
+      ignore_errors: yes
+      when: confirm_pre_tasks == 'yes'
+
+    - name: Purge RabbitMQ package
+      ansible.builtin.apt:
+        name: rabbitmq-server
+        state: absent
+        purge: yes
+        autoremove: yes
+        force: yes
+        update_cache: yes
+      when: confirm_pre_tasks == 'yes'
+
+    - name: Purge Erlang packages
+      ansible.builtin.apt:
+        name: "erlang*"
+        state: absent
+        purge: yes
+        autoremove: yes
+        force: yes
+      when: confirm_pre_tasks == 'yes'
+
+    - name: Autoremove unused packages
+      ansible.builtin.apt:
+        autoremove: yes
+        purge: yes
+      when: confirm_pre_tasks == 'yes'
+
+    - name: Autoclean package cache
+      ansible.builtin.apt:
+        autoclean: yes
+      when: confirm_pre_tasks == 'yes'
+
+    - name: Remove RabbitMQ data directory
+      ansible.builtin.file:
+        path: /var/lib/rabbitmq
+        state: absent
+      when: confirm_pre_tasks == 'yes'
+
+    - name: Remove RabbitMQ configuration directory
+      ansible.builtin.file:
+        path: /etc/rabbitmq
+        state: absent
+      when: confirm_pre_tasks == 'yes'
+
+    - name: Remove RabbitMQ logs directory
+      ansible.builtin.file:
+        path: /var/log/rabbitmq
+        state: absent
+      when: confirm_pre_tasks == 'yes'
+
+    - name: Delete rabbitmq user (if exists)
+      ansible.builtin.user:
+        name: rabbitmq
+        state: absent
+        remove: yes
+      ignore_errors: yes
+      when: confirm_pre_tasks == 'yes'  
+
+  tasks:
+    - name: Ensure required packages are installed
+      ansible.builtin.apt:
+        name:
+          - curl
+          - gnupg
+          - apt-transport-https
+        state: present
+        update_cache: yes
+
+    - name: Remove old/broken RabbitMQ APT sources if they exist
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /etc/apt/sources.list.d/rabbitmq-erlang.list
+        - /etc/apt/sources.list.d/rabbitmq-server.list
+        - /etc/apt/sources.list.d/deb1.rabbitmq.com.list
+        - /etc/apt/sources.list.d/deb2.rabbitmq.com.list
+
+    - name: Ensure keyrings directory exists
+      ansible.builtin.file:
+        path: /usr/share/keyrings
+        state: directory
+        mode: '0755'
+
+    - name: Import RabbitMQ signing key
+      ansible.builtin.shell: |
+        curl -1sLf "https://keys.openpgp.org/vks/v1/by-fingerprint/0A9AF2115F4687BD29803A206B73A36E6026DFCA" | gpg --dearmor > /tmp/com.rabbitmq.team.gpg && mv /tmp/com.rabbitmq.team.gpg /usr/share/keyrings/com.rabbitmq.team.gpg
+
+    - name: Add RabbitMQ apt repository
+      ansible.builtin.copy:
+        dest: /etc/apt/sources.list.d/rabbitmq.list
+        content: |
+          ## Modern Erlang/OTP releases
+          deb [arch=amd64 signed-by=/usr/share/keyrings/com.rabbitmq.team.gpg] https://deb1.rabbitmq.com/rabbitmq-erlang/ubuntu/noble noble main
+          deb [arch=amd64 signed-by=/usr/share/keyrings/com.rabbitmq.team.gpg] https://deb2.rabbitmq.com/rabbitmq-erlang/ubuntu/noble noble main
+
+          ## Latest RabbitMQ releases
+          deb [arch=amd64 signed-by=/usr/share/keyrings/com.rabbitmq.team.gpg] https://deb1.rabbitmq.com/rabbitmq-server/ubuntu/noble noble main
+          deb [arch=amd64 signed-by=/usr/share/keyrings/com.rabbitmq.team.gpg] https://deb2.rabbitmq.com/rabbitmq-server/ubuntu/noble noble main
+
+    - name: Update apt cache
+      ansible.builtin.apt:
+        update_cache: yes
+
+    - name: Install Erlang dependencies
+      ansible.builtin.apt:
+        name:
+          - erlang-base
+          - erlang-asn1
+          - erlang-crypto
+          - erlang-eldap
+          - erlang-ftp
+          - erlang-inets
+          - erlang-mnesia
+          - erlang-os-mon
+          - erlang-parsetools
+          - erlang-public-key
+          - erlang-runtime-tools
+          - erlang-snmp
+          - erlang-ssl
+          - erlang-syntax-tools
+          - erlang-tftp
+          - erlang-tools
+          - erlang-xmerl
+        state: present
+
+    - name: Install RabbitMQ server
+      ansible.builtin.apt:
+        name: rabbitmq-server
+        state: present
+
+    - name: Enables the rabbitmq_management plugin
+      community.rabbitmq.rabbitmq_plugin:
+        names: rabbitmq_management
+        state: enabled
+
+    - name: Ensure RabbitMQ is enabled and running
+      ansible.builtin.service:
+        name: rabbitmq-server
+        state: started
+        enabled: true
+
+    - name: Edit the server 1 hostname
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        insertafter: "^127\\.0\\.0\\.1\\s+localhost"
+        line: "{{ groups['rabbitmq'][1] }} {{ DNS_OR_IP_2 }} {{ HOST_2 }}"
+      delegate_to: "{{ groups['rabbitmq'][0] }}"
+      run_once: true
+
+    - name: Edit the server 2 hostname
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        insertafter: "^127\\.0\\.0\\.1\\s+localhost"
+        line: "{{ groups['rabbitmq'][0] }} {{ DNS_OR_IP_1 }} {{ HOST_1 }}"
+      delegate_to: "{{ groups['rabbitmq'][1] }}"
+      run_once: true
+
+    - name: Copy Erlang Cookie from Node 1 to Control Node
+      ansible.builtin.fetch:
+        src: "/var/lib/rabbitmq/.erlang.cookie"
+        dest: "/opt/" 
+        flat: yes
+      delegate_to: "{{ groups['rabbitmq'][0] }}"
+      run_once: true
+
+    - name: Copy Erlang Cookie from Control Node to Node 2
+      ansible.builtin.copy:
+        src: "/opt/.erlang.cookie"
+        dest: "/var/lib/rabbitmq/.erlang.cookie"
+        owner: rabbitmq
+        group: rabbitmq
+        mode: '0600'
+        remote_src: no 
+      delegate_to: "{{ groups['rabbitmq'][1] }}"
+      run_once: true
+
+    - name: Create RabbitMQ config file
+      template:
+        src: rabbitmq.conf.j2
+        dest: /etc/rabbitmq/rabbitmq.conf
+        mode: '0644'
+
+    - name: Ensure RabbitMQ is enabled and running
+      ansible.builtin.service:
+        name: rabbitmq-server
+        state: stopped
+        enabled: true
+
+    - name: Ensure RabbitMQ is enabled and running
+      ansible.builtin.service:
+        name: rabbitmq-server
+        state: started
+        enabled: true
+
+    - name: Stop RabbitMQ application
+      ansible.builtin.command: rabbitmqctl stop_app
+      delegate_to: "{{ groups['rabbitmq'][1] }}"
+      run_once: true
+
+    - name: Reset RabbitMQ application
+      ansible.builtin.command: rabbitmqctl reset
+      delegate_to: "{{ groups['rabbitmq'][1] }}"
+      run_once: true
+
+    - name: Join RabbitMQ Cluster
+      ansible.builtin.command: rabbitmqctl join_cluster rabbit@{{ HOST_1 }}
+      delegate_to: "{{ groups['rabbitmq'][1] }}"
+      run_once: true
+
+    - name: Start RabbitMQ application
+      ansible.builtin.command: rabbitmqctl start_app
+      delegate_to: "{{ groups['rabbitmq'][1] }}"
+      run_once: true
+
+    - name: Delete RabbitMQ user if exists
+      community.rabbitmq.rabbitmq_user:
+        user: "{{ USER_NAME }}"
+        state: absent
+      when: inventory_hostname == groups['rabbitmq'][1]
+
+    - name: Create RabbitMQ user
+      community.rabbitmq.rabbitmq_user:
+        user: "{{ USER_NAME }}"
+        password: "{{ RMQ_PASSWRD }}"
+        vhost: /
+        configure_priv: .*
+        write_priv: .*
+        read_priv: .*
+        state: present
+        tags: administrator
+      when: inventory_hostname == groups['rabbitmq'][1]
+
+    
